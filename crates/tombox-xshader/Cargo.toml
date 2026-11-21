@@ -20,6 +20,17 @@ path = "src/bin/xscan.rs"
 [dependencies]
 miniz_oxide = "0.8"
 
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
 [[bin]]
 name = "xpso"
 path = "src/bin/xpso.rs"

@@ -8,6 +8,10 @@ use tombox_xshader::hlsl::translate;
 use tombox_xshader::meta::{RootParam, RootParamKind, RootRange, RootSig, SigElement};
 use tombox_xshader::{ShaderExtract, Stage};
 
+#[cfg(windows)]
+#[path = "support/d3d12.rs"]
+mod d3d12;
+
 const S_ENDPGM: u32 = 0xbf81_0000;
 const S_NOP: u32 = 0xbf80_0000;
 /// `v_cvt_pkrtz_f16_f32 v0, v2, v2` / `v1, v2, v2`: the default colour-export packing.
@@ -170,4 +174,46 @@ fn texel_type_follows_the_use_of_the_loaded_value() {
     let t = translate(&ex).expect("translate (float use)");
     assert!(t.hlsl.contains("Texture2D<float4> tex0 : register(t0);"), "{}", t.hlsl);
     assert!(t.hlsl.contains("float4 t0 = tex0.Load("), "{}", t.hlsl);
+}
+
+fn buffer_add_shader() -> ShaderExtract {
+    let words = [
+        0xf408_0002, 0xfa00_0000, // s_load_dwordx4 s[0:3], s[4:5], 0
+        0xbf8c_0000,              // s_waitcnt all
+        0xe030_2000, 0x8000_0300, // buffer_load_dword v3, v0, s[0:3], 0 idxen
+        0xbf8c_0000,              // s_waitcnt all
+        0x4a06_0687,              // v_add_nc_u32 v3, 7, v3
+        0xe070_2000, 0x8000_0300, // buffer_store_dword v3, v0, s[0:3], 0 idxen
+        S_ENDPGM,
+    ];
+    let root = RootSig {
+        version: 2,
+        flags: 0,
+        params: vec![table(1, 1, 0)],
+        num_static_samplers: 0,
+    };
+    let mut ex = shader(Stage::Compute, &words, vec![], vec![], Some(root));
+    ex.isa_preamble = [0, 4, 1, 1];
+    ex
+}
+
+#[test]
+fn buffer_add_translates() {
+    let translated = translate(&buffer_add_shader()).expect("translate buffer add");
+    assert!(translated.hlsl.contains("RWStructuredBuffer<TbElem_ubuf0> ubuf0 : register(u0);"));
+    assert!(translated.hlsl.contains("[numthreads(4, 1, 1)]"));
+}
+
+/// Run explicitly with a Windows SDK and a shader model 6-capable D3D12 WARP runtime.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires DXC and the Windows D3D12 WARP runtime"]
+fn translated_compute_buffer_adds_seven() {
+    let translated = translate(&buffer_add_shader()).expect("translate buffer add");
+    let profile = tombox_xshader::dxc::profile_for(&translated.profile);
+    let dxil = tombox_xshader::dxc::compile(&translated.hlsl, &profile).expect("compile with DXC");
+
+    let input = [3, 29, u32::MAX - 2, 950];
+    let output = d3d12::dispatch_buffer(&dxil, input).expect("dispatch on D3D12 WARP");
+    assert_eq!(output, [10, 36, 4, 957]);
 }
