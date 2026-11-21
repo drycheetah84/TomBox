@@ -2669,8 +2669,9 @@ impl<'a> Emitter<'a> {
             };
         }
         // Compares (VOPC, and VOP3 with a scalar mask destination).
-        if m.starts_with("v_cmp_") {
-            let c = if m == "v_cmp_class_f32" {
+        // v_cmpx: same compare, destination already decoded as EXEC.
+        if m.starts_with("v_cmp_") || m.starts_with("v_cmpx_") {
+            let c = if m.ends_with("_class_f32") {
                 // Floating-point class test against a 10-bit class mask (see tb_cmp_class).
                 format!("tb_cmp_class({}, {})", r(&s[0])?, r(&s[1])?)
             } else {

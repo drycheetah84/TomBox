@@ -64,14 +64,50 @@ pub fn vopc(op: u32) -> Option<&'static str> {
         "v_cmp_f_u32", "v_cmp_lt_u32", "v_cmp_eq_u32", "v_cmp_le_u32", "v_cmp_gt_u32",
         "v_cmp_ne_u32", "v_cmp_ge_u32", "v_cmp_t_u32",
     ];
+    // v_cmpx forms: opcode bit 4 set (see is_cmpx). Opcodes per LLVM AMDGPU
+    // VOPCInstructions.td, GFX10 section: the f16 compares are split over 0xc8-0xcf and
+    // 0xe8-0xef because 0xd0-0xd7 is v_cmpx_*_u32.
+    const FX: [&str; 16] = [
+        "v_cmpx_f_f32", "v_cmpx_lt_f32", "v_cmpx_eq_f32", "v_cmpx_le_f32", "v_cmpx_gt_f32",
+        "v_cmpx_lg_f32", "v_cmpx_ge_f32", "v_cmpx_o_f32", "v_cmpx_u_f32", "v_cmpx_nge_f32",
+        "v_cmpx_nlg_f32", "v_cmpx_ngt_f32", "v_cmpx_nle_f32", "v_cmpx_neq_f32", "v_cmpx_nlt_f32",
+        "v_cmpx_tru_f32",
+    ];
+    const HX: [&str; 16] = [
+        "v_cmpx_f_f16", "v_cmpx_lt_f16", "v_cmpx_eq_f16", "v_cmpx_le_f16", "v_cmpx_gt_f16",
+        "v_cmpx_lg_f16", "v_cmpx_ge_f16", "v_cmpx_o_f16", "v_cmpx_u_f16", "v_cmpx_nge_f16",
+        "v_cmpx_nlg_f16", "v_cmpx_ngt_f16", "v_cmpx_nle_f16", "v_cmpx_neq_f16", "v_cmpx_nlt_f16",
+        "v_cmpx_tru_f16",
+    ];
+    const IX: [&str; 8] = [
+        "v_cmpx_f_i32", "v_cmpx_lt_i32", "v_cmpx_eq_i32", "v_cmpx_le_i32", "v_cmpx_gt_i32",
+        "v_cmpx_ne_i32", "v_cmpx_ge_i32", "v_cmpx_t_i32",
+    ];
+    const UX: [&str; 8] = [
+        "v_cmpx_f_u32", "v_cmpx_lt_u32", "v_cmpx_eq_u32", "v_cmpx_le_u32", "v_cmpx_gt_u32",
+        "v_cmpx_ne_u32", "v_cmpx_ge_u32", "v_cmpx_t_u32",
+    ];
     Some(match op {
         0x00..=0x0f => F[op as usize],
+        0x10..=0x1f => FX[(op - 0x10) as usize],
         0x80..=0x87 => I[(op - 0x80) as usize],
-        0xc0..=0xc7 => U[(op - 0xc0) as usize],
         0x88 => "v_cmp_class_f32",
-        0xc8..=0xd7 => H[(op - 0xc8) as usize],
+        0x90..=0x97 => IX[(op - 0x90) as usize],
+        0x98 => "v_cmpx_class_f32",
+        0xc0..=0xc7 => U[(op - 0xc0) as usize],
+        0xc8..=0xcf => H[(op - 0xc8) as usize],
+        0xd0..=0xd7 => UX[(op - 0xd0) as usize],
+        0xd8..=0xdf => HX[(op - 0xd8) as usize],
+        0xe8..=0xef => H[(op - 0xe0) as usize],
+        0xf8..=0xff => HX[(op - 0xf0) as usize],
         _ => return None,
     })
+}
+
+/// GFX10 VOPC opcodes with bit 4 set are the v_cmpx forms, which write EXEC only (LLVM's
+/// `_nosdst` pseudos: no VCC write in e32/SDWA, the e64 SDST field is ignored).
+pub fn is_cmpx(op: u32) -> bool {
+    op < 0x100 && op & 0x10 != 0
 }
 
 pub fn vop3(op: u32) -> Option<&'static str> {

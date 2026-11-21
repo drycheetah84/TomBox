@@ -171,3 +171,27 @@ fn texel_type_follows_the_use_of_the_loaded_value() {
     assert!(t.hlsl.contains("Texture2D<float4> tex0 : register(t0);"), "{}", t.hlsl);
     assert!(t.hlsl.contains("float4 t0 = tex0.Load("), "{}", t.hlsl);
 }
+
+/// GFX10 VOPC opcode layout (LLVM AMDGPU VOPCInstructions.td): bit 4 is the v_cmpx form,
+/// which writes EXEC only, in every encoding; 0xd0-0xd7 is v_cmpx_*_u32, and the f16
+/// compares continue at 0xe8, not 0xd0.
+#[test]
+fn vopc_cmpx_writes_exec_and_f16_compares_are_split() {
+    use tombox_xshader::rdna2::{disassemble, Opnd};
+    let words = [
+        0x7c28_0300u32,          // v_cmpx_gt_f32 v0, v1 (e32)
+        0x7da2_0300,             // v_cmpx_lt_u32 v0, v1 (e32)
+        0x7dd0_0300,             // v_cmp_u_f16 v0, v1 (e32)
+        0xd496_006a, 0x0002_0300, // v_cmpx_ge_i32 v0, v1 (e64, SDST field ignored)
+        S_ENDPGM,
+    ];
+    let isa: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let got: Vec<(String, Opnd)> = disassemble(&isa).into_iter().map(|i| (i.mnemonic, i.dst[0])).take(4).collect();
+    let want = [
+        ("v_cmpx_gt_f32", Opnd::ExecLo),
+        ("v_cmpx_lt_u32", Opnd::ExecLo),
+        ("v_cmp_u_f16", Opnd::VccLo),
+        ("v_cmpx_ge_i32", Opnd::ExecLo),
+    ];
+    assert_eq!(got, want.map(|(m, d)| (m.to_string(), d)));
+}
