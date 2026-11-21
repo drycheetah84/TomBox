@@ -3,8 +3,9 @@
 //! Purpose: find *where* a frame goes wrong. Every render-target / depth texture the title
 //! creates is remembered; when the trigger file `%TEMP%\tombox_capture_now` exists at a
 //! `PresentX`, each one is read back and written to `%TEMP%\tombox_rtcap\<n>\` as a BMP
-//! preview plus one line of statistics (min / max / mean per channel, NaN / Inf counts) in
-//! `report.txt`.
+//! preview plus one line of sampled statistics (min / max / mean per channel, NaN / Inf counts)
+//! in `report.txt`. Targets selected with `raw <ids>` also get full-resolution counts of
+//! affected pixels and the first NaN and Inf coordinates, measured from the top left.
 //!
 //! This is a development tool, not part of the compatibility surface:
 //!   * it holds a reference on every render target for the life of the process (leak);
@@ -173,6 +174,46 @@ fn decode(kind: &str, p: &[u8]) -> [f32; 4] {
     }
 }
 
+#[derive(Default)]
+struct NonFinitePixels {
+    total: usize,
+    nan: usize,
+    inf: usize,
+    first_nan: Option<(usize, usize)>,
+    first_inf: Option<(usize, usize)>,
+}
+
+fn encode_raw<'a>(
+    rows: impl Iterator<Item = &'a [u8]>,
+    kind: &str,
+    bytes_per_pixel: usize,
+    channels: usize,
+    out: &mut Vec<u8>,
+) -> NonFinitePixels {
+    let mut stats = NonFinitePixels::default();
+    for (y, row) in rows.enumerate() {
+        for (x, pixel) in row.chunks_exact(bytes_per_pixel).enumerate() {
+            let values = decode(kind, pixel);
+            let active = &values[..channels];
+            let has_nan = active.iter().any(|v| v.is_nan());
+            let has_inf = active.iter().any(|v| v.is_infinite());
+            if has_nan {
+                stats.nan += 1;
+                stats.first_nan.get_or_insert((x, y));
+            }
+            if has_inf {
+                stats.inf += 1;
+                stats.first_inf.get_or_insert((x, y));
+            }
+            stats.total += usize::from(has_nan || has_inf);
+            for value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    stats
+}
+
 fn write_bmp(path: &std::path::Path, w: usize, h: usize, rgb: &[u8]) {
     let row = (w * 3 + 3) & !3;
     let size = 54 + row * h;
@@ -326,18 +367,15 @@ pub unsafe fn maybe_capture(queue: *mut c_void) {
             vcall!(buf, 2, fn() -> u32);
             continue;
         }
-        if raw_ids.contains(&order) {
+        let full_stats = if raw_ids.contains(&order) {
             let mut out = Vec::with_capacity(w * h * 16);
-            for y in 0..h {
-                let row = core::slice::from_raw_parts(data.add(y * pitch), w * bpp);
-                for x in 0..w {
-                    for c in decode(kind, &row[x * bpp..x * bpp + bpp]) {
-                        out.extend_from_slice(&c.to_le_bytes());
-                    }
-                }
-            }
+            let rows = (0..h).map(|y| core::slice::from_raw_parts(data.add(y * pitch), w * bpp));
+            let stats = encode_raw(rows, kind, bpp, ch, &mut out);
             let _ = std::fs::write(dir.join(format!("rt{order:03}_{w}x{h}.f32")), out);
-        }
+            Some(stats)
+        } else {
+            None
+        };
         // Statistics + preview (downscaled to <= 960 wide).
         let step = (w / 960).max(1);
         let (pw, ph) = (w / step, h / step);
@@ -395,7 +433,16 @@ pub unsafe fn maybe_capture(queue: *mut c_void) {
         } else {
             String::new()
         };
-        let _ = writeln!(report, "{head} {kind}: {} nan={nan} inf={inf} |v|>100: {big}{extra}", chans.join(" "));
+        let full = full_stats.map_or_else(String::new, |stats| {
+            let coord = |point: Option<(usize, usize)>| {
+                point.map_or_else(|| "-".to_string(), |(x, y)| format!("({x},{y})"))
+            };
+            format!(
+                " | full-res nonfinite_pixels={} nan_pixels={} inf_pixels={} first_nan={} first_inf={}",
+                stats.total, stats.nan, stats.inf, coord(stats.first_nan), coord(stats.first_inf),
+            )
+        });
+        let _ = writeln!(report, "{head} {kind}: {} nan={nan} inf={inf} |v|>100: {big}{extra}{full}", chans.join(" "));
         vcall!(buf, 9, fn(u32, *const c_void) -> (), 0, core::ptr::null());
         vcall!(buf, 2, fn() -> u32);
         done += 1;
@@ -405,6 +452,39 @@ pub unsafe fn maybe_capture(queue: *mut c_void) {
     vcall!(fence, 2, fn() -> u32);
     record("d3d12_xs", "rtcap", &format!("captured {done} render targets into {}", dir.display()));
     end_frame(Some(&dir));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_capture_counts_nonfinite_pixels_between_preview_samples() {
+        const WIDTH: usize = 1920;
+        const BPP: usize = 8;
+        let mut image = [[0u8; WIDTH * BPP]; 2];
+        // At this width the preview samples even rows and columns.
+        image[1][BPP..BPP + 6].copy_from_slice(&[0, 0x7c, 0, 0xfc, 0, 0x7e]);
+        image[1][3 * BPP..3 * BPP + 2].copy_from_slice(&[0, 0xfc]);
+        let mut raw = Vec::new();
+
+        let stats = encode_raw(image.iter().map(|row| row.as_slice()), "rgba16f", BPP, 4, &mut raw);
+
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.nan, 1);
+        assert_eq!(stats.inf, 2);
+        assert_eq!(stats.first_nan, Some((1, 1)));
+        assert_eq!(stats.first_inf, Some((1, 1)));
+        assert_eq!(raw.len(), WIDTH * 2 * 16);
+        let offset = (WIDTH + 1) * 16;
+        let channel = |i: usize| {
+            f32::from_le_bytes(raw[offset + i * 4..offset + (i + 1) * 4].try_into().unwrap())
+        };
+        assert_eq!(channel(0), f32::INFINITY);
+        assert_eq!(channel(1), f32::NEG_INFINITY);
+        assert!(channel(2).is_nan());
+        assert_eq!(channel(3), 0.0);
+    }
 }
 
 // ---- draw trace ------------------------------------------------------------------------
