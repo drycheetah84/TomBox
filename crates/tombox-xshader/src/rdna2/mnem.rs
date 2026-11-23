@@ -290,8 +290,8 @@ pub fn lookup(enc: Enc, op: u32) -> Option<&'static str> {
         Enc::Flat => match op & 0x7f {
             0x0c => Some("flat_load_dword"),
             0x0d => Some("flat_load_dwordx2"),
-            0x0e => Some("flat_load_dwordx3"),
-            0x0f => Some("flat_load_dwordx4"),
+            0x0e => Some("flat_load_dwordx4"),
+            0x0f => Some("flat_load_dwordx3"),
             _ => None,
         },
         Enc::Ds => match op {

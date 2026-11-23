@@ -447,3 +447,29 @@ fn one_wave_compute_lds_phases_get_group_barriers() {
     let t = translate(&ex).expect("translate");
     assert!(!t.hlsl.contains("wave_lds_sync"), "{}", t.hlsl);
 }
+
+/// GFX10 FLAT/GLOBAL opcode 0x0e is `load_dwordx4` and 0x0f is `load_dwordx3` (the same
+/// order as MUBUF; LLVM `FLATInstructions.td`, `FLAT_Real_Base_gfx10` and
+/// `FLAT_Real_AllAddr_gfx10`). With the two swapped, a dwordx3 load from a code-section
+/// table also overwrote the register after its destination range.
+#[test]
+fn global_load_dwordx3_and_dwordx4_write_their_own_register_count() {
+    for (op, mnemonic, count) in [(0x0e_u32, "flat_load_dwordx4", 4u8), (0x0f, "flat_load_dwordx3", 3)] {
+        let words = [
+            0xbe80_1f00,                         // s_getpc_b64 s[0:1]
+            0x7e00_0200,                         // v_mov_b32 v0, s0
+            0x7e02_0201,                         // v_mov_b32 v1, s1
+            0xdc00_8000 | op << 18, 0x047d_0000, // global_load_dwordx{4,3} v[4:..], v[0:1], off
+            0xbf8c_0000,                         // s_waitcnt 0
+            S_ENDPGM,
+        ];
+        let ex = shader(Stage::Compute, &words, vec![], vec![], None);
+        let t = translate(&ex).expect("translate");
+        for v in 4..8u8 {
+            let written = t.hlsl.contains(&format!("v{v} = t"));
+            assert_eq!(written, v < 4 + count, "{mnemonic} (op {op:#x}) and v{v}
+{}", t.hlsl);
+        }
+        assert_eq!(tombox_xshader::rdna2::disassemble(&ex.isa)[3].mnemonic, mnemonic);
+    }
+}
